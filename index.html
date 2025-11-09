@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Find your constituency — Gujarat (Surat)</title>
+
+  <!-- Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Turf.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+  <!-- SheetJS to read Excel client-side -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.7/dist/xlsx.full.min.js"></script>
+
+  <style>
+    :root{--bg:#071827;--muted:#9fb3c9;--accent:#06b6d4}
+    body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial;background:linear-gradient(180deg,#03151c,#051826);color:#eaf5fb}
+    .wrap{max-width:1100px;margin:18px auto;padding:18px}
+    header{display:flex;gap:12px;align-items:center}
+    .logo{width:56px;height:56px;border-radius:10px;background:linear-gradient(135deg,var(--accent),#7c3aed);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px}
+    h1{margin:0;font-size:18px}
+    p.lead{margin:2px 0 0;color:var(--muted);font-size:13px}
+
+    .grid{display:grid;grid-template-columns:1fr 380px;gap:16px;margin-top:14px}
+    @media(max-width:920px){.grid{grid-template-columns:1fr}}
+
+    .card{background:rgba(255,255,255,0.03);padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.03)}
+    #map{height:72vh;border-radius:8px}
+    .controls{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+    .btn{background:var(--accent);border:none;padding:8px 12px;border-radius:8px;color:#062022;font-weight:700;cursor:pointer}
+    .btn.ghost{background:transparent;color:var(--accent);border:1px solid rgba(255,255,255,0.04)}
+    input[type="file"]{display:none}
+
+    .side{display:flex;flex-direction:column;gap:12px}
+    #details{min-height:120px;color:var(--muted);font-size:14px}
+    .list{max-height:46vh;overflow:auto;margin-top:8px}
+    .row{padding:8px;border-radius:8px;margin-bottom:8px;border:1px solid rgba(255,255,255,0.02);display:flex;gap:10px;align-items:center}
+    .seat-pin{transform:translateY(-6px);font-size:20px}
+
+    footer{color:var(--muted);font-size:12px;margin-top:12px;text-align:center}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">C</div>
+      <div>
+        <h1>Find your constituency — Gujarat (Surat)</h1>
+        <p class="lead">Allow location to identify your assembly/parliamentary constituency. We place a pin at the constituency centroid (approx.).</p>
+      </div>
+    </header>
+
+    <div class="grid">
+      <main class="card">
+        <div class="controls">
+          <button id="locateBtn" class="btn">📍 Find my constituency</button>
+          <button id="resetBtn" class="btn ghost">Reset</button>
+          <div style="flex:1"></div>
+          <div id="status" style="color:var(--muted);font-size:13px"></div>
+        </div>
+
+        <div id="map"></div>
+
+        <div style="margin-top:10px;color:var(--muted);font-size:13px">
+          <strong>Privacy:</strong> Your coordinates are used only in your browser to determine the constituency. The map places a pin at the constituency centroid — not your exact location.
+        </div>
+      </main>
+
+      <aside class="side">
+        <div class="card">
+          <strong>Constituency details</strong>
+          <div id="details">Click <strong>Find my constituency</strong> to begin.</div>
+
+          <div style="margin-top:10px"><strong>Quick search</strong></div>
+          <input id="search" placeholder="Search AC / MLA / MP" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:inherit;margin-top:8px" />
+          <div id="list" class="list"></div>
+        </div>
+
+        <div class="card">
+          <div style="font-weight:700">Files this page reads</div>
+          <div style="color:var(--muted);margin-top:6px;font-size:13px">
+            <ul>
+              <li><code>data/GJ final list.xlsx</code> (workbook - MLAs + MPs sheets)</li>
+              <li><code>data/assembly_surat.geojson</code></li>
+              <li><code>data/loksabha_surat.geojson</code></li>
+            </ul>
+            <div style="margin-top:6px">If your sheet names or column headings differ, the page tries to detect them automatically. See notes below.</div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <footer>Built with Leaflet · Turf · SheetJS · Deploy: GitHub Pages</footer>
+  </div>
+
+<script>
+/* CONFIG - filepaths (leave as-is) */
+const EXCEL_FILE = 'data/GJ final list.xlsx';
+const ASSEMBLY_GEOJSON = 'data/assembly_surat.geojson';
+const LOKSABHA_GEOJSON = 'data/loksabha_surat.geojson';
+
+/* UI elements */
+const statusEl = ()=>document.getElementById('status');
+const detailsEl = ()=>document.getElementById('details');
+const listEl = ()=>document.getElementById('list');
+
+/* Normalizer */
+function normKey(s){
+  if(!s) return '';
+  return String(s).trim().toLowerCase().replace(/\s+/g,' ').normalize('NFKD');
+}
+
+/* Globals */
+let map;
+let assemblyGJ = null;
+let loksGJ = null;
+let mlasByKey = {}, mpsByKey = {};
+let seatMarker = null, seatHighlight = null;
+
+/* Init map */
+function initMap(){
+  map = L.map('map').setView([21.17,72.83], 12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'© OpenStreetMap'}).addTo(map);
+}
+
+/* Load GeoJSON */
+async function loadGeo(url){
+  try{
+    const r = await fetch(url);
+    if(!r.ok) throw new Error('404: ' + url);
+    return await r.json();
+  } catch(e){
+    console.warn('Geo load failed', e);
+    return null;
+  }
+}
+
+/* Read Excel (SheetJS) and build lookups
+   - tries to automatically find MLA sheet and MP sheet
+   - expects columns like ac_name/Constituency, MLA Name, Party; for MPs expects pc_name/Parliamentary, MP Name, Party
+*/
+async function loadExcelWorkbook(url){
+  statusEl().textContent = 'Loading workbook...';
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('Workbook not found: ' + url);
+  const arrayBuffer = await res.arrayBuffer();
+  const data = new Uint8Array(arrayBuffer);
+  const workbook = XLSX.read(data, {type:'array'});
+
+  // Strategy: inspect sheet names; pick the sheet that contains "mla" or "assembly" or "constituency" as MLAs,
+  // and pick one with "mp" or "loksabha" or "parliament" as MPs. If not found, assume first sheet = MLAs, second = MPs.
+  const sNames = workbook.SheetNames.map(s=>s.toLowerCase());
+  let mlaSheetName = null, mpSheetName = null;
+  for(const s of workbook.SheetNames){
+    const sl = s.toLowerCase();
+    if(!mlaSheetName && (sl.includes('mla') || sl.includes('assembly') || sl.includes('ac') || sl.includes('constitu'))) mlaSheetName = s;
+    if(!mpSheetName && (sl.includes('mp') || sl.includes('parliament') || sl.includes('pc') || sl.includes('loksabha'))) mpSheetName = s;
+  }
+  if(!mlaSheetName) mlaSheetName = workbook.SheetNames[0];
+  if(!mpSheetName) mpSheetName = (workbook.SheetNames[1] || workbook.SheetNames[0]);
+
+  // parse sheets to arrays of objects
+  const mlaRows = XLSX.utils.sheet_to_json(workbook.Sheets[mlaSheetName], {defval:''});
+  const mpRows  = XLSX.utils.sheet_to_json(workbook.Sheets[mpSheetName], {defval:''});
+
+  statusEl().textContent = `Parsing sheets: MLA=${mlaSheetName}, MP=${mpSheetName}`;
+
+  // helper: detect columns by fuzzy matching
+  function findCol(cols, candidates){
+    for(const c of cols){
+      const lc = c.toLowerCase();
+      for(const cand of candidates){
+        if(lc.includes(cand)) return c;
+      }
+    }
+    return null;
+  }
+
+  // build MLA lookup
+  if(mlaRows.length){
+    const cols = Object.keys(mlaRows[0] || {});
+    const acCol = findCol(cols, ['constitu', 'ac ', 'ac_name', 'assembly', 'acname']) || cols[0];
+    const nameCol = findCol(cols, ['mla', 'name', 'representative', 'candidate']) || cols[1] || cols[0];
+    const partyCol = findCol(cols, ['party', 'political']) || cols[2] || cols[1] || cols[0];
+
+    mlaRows.forEach(r=>{
+      const ac = String(r[acCol] || '').trim();
+      if(!ac) return;
+      const key = normKey(ac);
+      mlasByKey[key] = {
+        ac_name: ac,
+        mla_name: String(r[nameCol] || '').trim(),
+        mla_party: String(r[partyCol] || '').trim()
+      };
+    });
+  }
+
+  // build MP lookup
+  if(mpRows.length){
+    const cols2 = Object.keys(mpRows[0] || {});
+    const pcCol = findCol(cols2, ['parliament', 'pc', 'parl', 'constituency', 'pc_name']) || cols2[0];
+    const nameCol = findCol(cols2, ['mp', 'name', 'member']) || cols2[1] || cols2[0];
+    const partyCol = findCol(cols2, ['party']) || cols2[2] || cols2[1] || cols2[0];
+
+    mpRows.forEach(r=>{
+      const pc = String(r[pcCol] || '').trim();
+      if(!pc) return;
+      const key = normKey(pc);
+      mpsByKey[key] = {
+        pc_name: pc,
+        mp_name: String(r[nameCol] || '').trim(),
+        mp_party: String(r[partyCol] || '').trim()
+      };
+    });
+  }
+
+  statusEl().textContent = 'Workbook loaded';
+}
+
+/* find containing feature using turf booleanPointInPolygon */
+function findContainingFeature(geojson, point){
+  if(!geojson || !geojson.features) return null;
+  for(const f of geojson.features){
+    try{
+      if(turf.booleanPointInPolygon(point, f)) return f;
+    }catch(e){}
+  }
+  return null;
+}
+
+/* centroid & nearest fallback */
+function centroidLatLng(feat){
+  const c = turf.centroid(feat).geometry.coordinates; return [c[1], c[0]];
+}
+function nearestCentroid(geojson, lat, lng){
+  if(!geojson || !geojson.features) return null;
+  let best=null, bestD=Infinity;
+  for(const f of geojson.features){
+    try{
+      const c = turf.centroid(f).geometry.coordinates;
+      const d = haversine(lat,lng,c[1],c[0]);
+      if(d < bestD){ bestD = d; best = f; }
+    }catch(e){}
+  }
+  return best;
+}
+function haversine(lat1,lon1,lat2,lon2){ const R=6371, toRad=Math.PI/180; const dLat=(lat2-lat1)*toRad; const dLon=(lon2-lon1)*toRad; const a=Math.sin(dLat/2)**2 + Math.cos(lat1*toRad)*Math.cos(lat2*toRad)*Math.sin(dLon/2)**2; return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)); }
+
+/* show centroid pin and popup (approx only) */
+function showSeatMarker(feat, approxText){
+  if(seatHighlight){ map.removeLayer(seatHighlight); seatHighlight=null; }
+  if(seatMarker){ map.removeLayer(seatMarker); seatMarker=null; }
+
+  seatHighlight = L.geoJSON(feat, {style:{color:'#06b6d4',weight:2,fillOpacity:0.06}}).addTo(map);
+  const [lat,lng] = centroidLatLng(feat);
+  seatMarker = L.marker([lat,lng], {icon: L.divIcon({className:'seat-pin', html:'📍', iconSize:[28,28], iconAnchor:[14,28]})}).addTo(map);
+
+  // lookup names
+  const acName = feat.properties?.ac_name || feat.properties?.AC_NAME || feat.properties?.name || '';
+  const pcName = feat.properties?.pc_name || feat.properties?.PC_NAME || feat.properties?.parl_const || '';
+  const mla = mlasByKey[normKey(acName)] || {mla_name:'Not found', mla_party:''};
+  const mp  = mpsByKey[normKey(pcName)] || {mp_name:'Not found', mp_party:''};
+
+  const html = `<div style="font-weight:700">${acName || pcName || 'Constituency'}</div>
+    <div style="margin-top:6px"><strong>MLA:</strong> ${mla.mla_name || 'Not found'} ${mla.mla_party ? ' • ' + mla.mla_party : ''}</div>
+    <div style="margin-top:4px"><strong>MP:</strong> ${mp.mp_name || 'Not found'} ${mp.mp_party ? ' • ' + mp.mp_party : ''}</div>
+    <div style="margin-top:8px;color:#9fb3c9;font-size:12px">${approxText}</div>`;
+
+  seatMarker.bindPopup(html).openPopup();
+  detailsEl().innerHTML = html;
+  map.fitBounds(seatHighlight.getBounds(), {maxZoom:13});
+}
+
+/* locate flow: get permission -> find containing polygon -> place centroid pin */
+function locateConstituency(){
+  const btn = document.getElementById('locateBtn');
+  btn.disabled = true; btn.textContent = 'Locating…';
+  if(!navigator.geolocation){ alert('Geolocation not supported'); btn.disabled=false; btn.textContent='Find my constituency'; return; }
+  navigator.geolocation.getCurrentPosition((pos)=>{
+    try{
+      const lat = pos.coords.latitude, lng = pos.coords.longitude;
+      const pt = turf.point([lng,lat]);
+
+      // order: assembly -> loksabha
+      let feat = findContainingFeature(assemblyGJ, pt);
+      let approxText = 'Exact match within assembly boundary (shown at centroid).';
+      if(!feat){
+        feat = findContainingFeature(loksGJ, pt);
+        approxText = feat ? 'Parliamentary constituency matched (shown at centroid).' : '';
+      }
+      if(feat){ showSeatMarker(feat, approxText); btn.disabled=false; btn.textContent='Find my constituency'; return; }
+
+      // fallback to nearest assembly centroid
+      const nearest = nearestCentroid(assemblyGJ, lat, lng);
+      if(nearest){ showSeatMarker(nearest, 'No exact polygon match — showing nearest assembly centroid (approx).'); btn.disabled=false; btn.textContent='Find my constituency'; return; }
+
+      alert('No polygons loaded or no match could be found.');
+    } finally { btn.disabled=false; btn.textContent='Find my constituency'; }
+  }, (err)=>{
+    alert('Could not get location permission or an error occurred: ' + (err.message || err.code));
+    document.getElementById('locateBtn').disabled=false;
+    document.getElementById('locateBtn').textContent='Find my constituency';
+  }, {enableHighAccuracy:true, timeout:12000});
+}
+
+/* build searchable list from assemblyGJ */
+function buildList(){
+  const list = listEl();
+  list.innerHTML = '';
+  if(!assemblyGJ || !assemblyGJ.features){ list.innerHTML = '<div style="color:#9fb3c9">Assembly boundaries not loaded</div>'; return; }
+  assemblyGJ.features.forEach(f=>{
+    const p = f.properties || {};
+    const name = p.ac_name || p.AC_NAME || p.name || 'Unknown';
+    const mla = mlasByKey[normKey(name)] || {mla_name:'Unknown', mla_party:''};
+    const row = document.createElement('div'); row.className='row';
+    row.innerHTML = `<div style="min-width:40px;height:40px;border-radius:8px;background:${mla.mla_party && mla.mla_party.toLowerCase().includes('bjp')? '#ff9933' : '#9fb3c9'};display:flex;align-items:center;justify-content:center;font-weight:700;color:#062022">${(name||'A').split(' ')[0]}</div>
+                     <div style="flex:1"><div style="font-weight:700">${name}</div><div style="color:#9fb3c9;font-size:13px">${mla.mla_name} • ${mla.mla_party}</div></div>`;
+    row.onclick = ()=>{ showSeatMarker(f, 'Selected from list — centroid shown.'); };
+    list.appendChild(row);
+  });
+}
+
+/* wire search filter */
+function wireSearch(){
+  const s = document.getElementById('search');
+  s.addEventListener('input', ()=> {
+    const q = s.value.trim().toLowerCase();
+    Array.from(listEl().children).forEach(li=>{
+      const txt = li.innerText.toLowerCase();
+      li.style.display = q? (txt.includes(q) ? 'flex' : 'none') : 'flex';
+    });
+  });
+}
+
+/* reset */
+function resetMap(){
+  if(seatMarker){ map.removeLayer(seatMarker); seatMarker=null; }
+  if(seatHighlight){ map.removeLayer(seatHighlight); seatHighlight=null; }
+  map.setView([21.17,72.83], 12);
+  detailsEl().innerHTML = 'Click <strong>Find my constituency</strong> to begin.';
+}
+
+/* boot sequence */
+async function boot(){
+  initMap();
+  try{
+    statusEl().textContent = 'Loading data…';
+    // load excel
+    await loadExcelWorkbook(EXCEL_FILE);
+    // load geojsons
+    assemblyGJ = await loadGeo(ASSEMBLY_GEOJSON);
+    loksGJ = await loadGeo(LOKSABHA_GEOJSON);
+    buildList(); wireSearch();
+    statusEl().textContent = '';
+    document.getElementById('locateBtn').addEventListener('click', locateConstituency);
+    document.getElementById('resetBtn').addEventListener('click', resetMap);
+  } catch(e){
+    console.error(e);
+    statusEl().textContent = 'Failed to load data — check console & file paths.';
+    detailsEl().innerHTML = `<div style="color:#ffb3b3">Error: ${e.message}</div>`;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', boot);
+</script>
+</body>
+</html>
